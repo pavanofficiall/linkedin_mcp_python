@@ -3,7 +3,7 @@
   "name": "LinkedIn Auto-Connect Helper",
   "version": "1.0",
   "description": "Automate LinkedIn connection requests with human-like behavior.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": ["https://www.linkedin.com/*"],
   "action": {
     "default_popup": "popup.html"
