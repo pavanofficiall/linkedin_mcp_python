@@ -29,30 +29,49 @@ function updateStatus(text, type = 'info') {
   }
 }
 
-async function waitForElement(selector, textMatch, timeout = 10000) {
+async function waitForElement(textMatch, timeout = 10000) {
   const start = Date.now();
-  console.log(`Starting wait for: ${textMatch}`);
+  console.log(`Starting deep search for: ${textMatch}`);
+  
   while (Date.now() - start < timeout) {
-    // Search in ALL elements first, then narrow down if needed
-    const allElements = Array.from(document.querySelectorAll(selector + ', .artdeco-button--primary, .artdeco-button--solid'));
-    const found = allElements.find(el => {
-      const t = (el.innerText || '').toLowerCase();
-      const l = (el.getAttribute('aria-label') || '').toLowerCase();
-      const c = (el.className || '').toLowerCase();
-      
-      const match = t.includes(textMatch.toLowerCase()) || 
-                    l.includes(textMatch.toLowerCase()) ||
-                    (textMatch === 'send' && (c.includes('send') || t.includes('without a note')));
-      
-      return match && el.offsetParent !== null; // Must be visible
-    });
-    if (found) {
-        console.log(`Found element: ${found.innerText}`);
-        return found;
+    // 1. Search in main document
+    let found = findInDocument(document, textMatch);
+    if (found) return found;
+
+    // 2. Search in all iframes
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+    for (const iframe of iframes) {
+      try {
+        const frameDoc = iframe.contentDocument || iframe.contentWindow.document;
+        found = findInDocument(frameDoc, textMatch);
+        if (found) return found;
+      } catch (e) {
+        // Cross-origin iframe, cannot access
+      }
     }
+
     await new Promise(r => setTimeout(r, 500));
   }
   return null;
+}
+
+function findInDocument(doc, textMatch) {
+  const query = 'button, a, [role="button"], span, div';
+  const elements = Array.from(doc.querySelectorAll(query));
+  return elements.find(el => {
+    const t = (el.innerText || '').toLowerCase();
+    const l = (el.getAttribute('aria-label') || '').toLowerCase();
+    const c = (el.className || '').toLowerCase();
+    
+    // Exact or partial match for the text
+    const hasText = t.includes(textMatch.toLowerCase()) || l.includes(textMatch.toLowerCase());
+    
+    // Additional heuristics for the blue "Send" button
+    const isBlueSend = textMatch.toLowerCase() === 'send' && 
+                       (c.includes('primary') || t.includes('note'));
+    
+    return (hasText || isBlueSend) && el.offsetParent !== null; 
+  });
 }
 
 async function autoConnect(options) {
@@ -94,7 +113,7 @@ async function autoConnect(options) {
       btn.click();
       
       // Wait for the Send button to appear in the popup
-      const sendBtn = await waitForElement('button', 'send');
+      const sendBtn = await waitForElement('send');
       
       if (sendBtn) {
         updateStatus(`Finalizing request to ${name}...`);
@@ -114,7 +133,7 @@ async function autoConnect(options) {
       }
 
       // Check for success/dismissal popups like "Got it"
-      const doneBtn = await waitForElement('button', 'done', 2000);
+      const doneBtn = await waitForElement('done', 2000);
       if (doneBtn) doneBtn.click();
 
       const nextDelay = Math.floor(Math.random() * (delayMax - delayMin)) + delayMin;
