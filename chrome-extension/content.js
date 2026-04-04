@@ -1,64 +1,9 @@
 /* 
  * LinkedIn Auto-Connect Content Script
- * ------------------------------------
- * Monitors the page for Connect buttons and simulates 
- * human-like clicks.
+ * State-based approach using chrome.storage to survive page navigations.
  */
 
-console.log("LinkedIn Auto-Connect Extension loaded on:", window.location.href);
-
-// -------------------------------------------------------
-// AUTO-SEND on /preload/custom-invite/ page
-// LinkedIn sometimes redirects here instead of showing a popup.
-// We detect this page and click "Send without a note" automatically.
-// -------------------------------------------------------
-if (window.location.href.includes('/preload/custom-invite/') || 
-    window.location.href.includes('/checkpoint/') ||
-    document.title.toLowerCase().includes('invite')) {
-  console.log("On invite page! Auto-clicking Send without a note...");
-  autoClickSendOnInvitePage();
-}
-
-async function autoClickSendOnInvitePage() {
-  // Wait up to 10 seconds for the page to load the button
-  const start = Date.now();
-  while (Date.now() - start < 10000) {
-    const allBtns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-    const sendBtn = allBtns.find(b => {
-      const t = (b.innerText || '').toLowerCase();
-      const l = (b.getAttribute('aria-label') || '').toLowerCase();
-      return t.includes('send without a note') || 
-             (t.includes('send') && !t.includes('feedback') && !t.includes('message')) ||
-             l.includes('send without a note');
-    });
-    
-    if (sendBtn && sendBtn.offsetParent !== null) {
-      console.log("Found Send button:", sendBtn.innerText);
-      sendBtn.click();
-      console.log("Clicked! Request sent.");
-      return;
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  console.log("Could not find Send button on invite page.");
-}
-
-
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "START_CONNECT") {
-    autoConnect(request.options);
-    sendResponse({ status: "STARTED" });
-  } else if (request.action === "STOP_CONNECT") {
-    stopConnection = true;
-    sendResponse({ status: "STOPPING" });
-  }
-});
-
-let stopConnection = false;
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+const STORAGE_KEY = 'li_autoconnect_session';
 
 function updateStatus(text, type = 'info') {
   if (chrome.runtime && chrome.runtime.sendMessage) {
@@ -66,122 +11,178 @@ function updateStatus(text, type = 'info') {
   }
 }
 
-async function waitForElement(textMatch, timeout = 10000) {
-  const start = Date.now();
-  console.log(`Starting deep search for: ${textMatch}`);
-  
-  while (Date.now() - start < timeout) {
-    // 1. Search in main document
-    let found = findInDocument(document, textMatch);
-    if (found) return found;
+// ─────────────────────────────────────────────────────────
+// MESSAGE LISTENER — START / STOP from popup
+// ─────────────────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "START_CONNECT") {
+    // Save session to storage and begin
+    const session = {
+      active: true,
+      currentIndex: 0,
+      limit: request.options.limit || 10,
+      delayMin: request.options.delayMin || 5000,
+      delayMax: request.options.delayMax || 12000,
+      sent: 0,
+      returnUrl: window.location.href
+    };
+    chrome.storage.local.set({ [STORAGE_KEY]: session }, () => {
+      sendResponse({ status: "STARTED" });
+      runSearchPageFlow(session);
+    });
+    return true; // Keep channel open for async sendResponse
+  }
 
-    // 2. Search in all iframes
-    const iframes = Array.from(document.querySelectorAll('iframe'));
-    for (const iframe of iframes) {
-      try {
-        const frameDoc = iframe.contentDocument || iframe.contentWindow.document;
-        found = findInDocument(frameDoc, textMatch);
-        if (found) return found;
-      } catch (e) {
-        // Cross-origin iframe, cannot access
-      }
+  if (request.action === "STOP_CONNECT") {
+    chrome.storage.local.remove(STORAGE_KEY);
+    updateStatus('⏹ Stopped.');
+    sendResponse({ status: "STOPPED" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// ON PAGE LOAD — decide what to do based on current URL
+// ─────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  chrome.storage.local.get(STORAGE_KEY, (data) => {
+    const session = data[STORAGE_KEY];
+    if (!session || !session.active) return;
+
+    const url = window.location.href;
+
+    // Case 1: We're on the custom-invite redirect page → click Send
+    if (url.includes('/preload/custom-invite/') || url.includes('/in/') && url.includes('invite')) {
+      handleInvitePage(session);
     }
+    // Case 2: We're back on the search results page → continue loop
+    else if (url.includes('/search/results/people/')) {
+      // Small delay to let the page render fully
+      setTimeout(() => runSearchPageFlow(session), 3000);
+    }
+  });
+});
 
-    await new Promise(r => setTimeout(r, 500));
+// ─────────────────────────────────────────────────────────
+// SEARCH PAGE: Find connect buttons and click the right one
+// ─────────────────────────────────────────────────────────
+async function runSearchPageFlow(session) {
+  if (!session.active) return;
+
+  if (session.sent >= session.limit) {
+    updateStatus(`✅ Done! Sent ${session.sent} requests.`);
+    chrome.storage.local.remove(STORAGE_KEY);
+    return;
+  }
+
+  updateStatus(`🔍 Finding leads... (${session.sent}/${session.limit} sent)`);
+
+  // Wait for results to load
+  await sleep(2000);
+
+  const connectButtons = getConnectButtons();
+  console.log(`Found ${connectButtons.length} connect buttons, targeting index ${session.currentIndex}`);
+
+  if (connectButtons.length === 0) {
+    updateStatus('⚠️ No connect buttons found. Scroll down?', 'error');
+    return;
+  }
+
+  const btn = connectButtons[session.currentIndex];
+  if (!btn) {
+    updateStatus(`✅ Done! Sent ${session.sent} requests.`);
+    chrome.storage.local.remove(STORAGE_KEY);
+    return;
+  }
+
+  const name = btn.getAttribute('aria-label')?.replace('Invite ', '').replace(' to connect', '') || 'someone';
+  updateStatus(`🤝 Connecting with ${name}...`);
+
+  btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  await sleep(1500);
+
+  // Save incremented index BEFORE clicking (in case of navigation)
+  const updatedSession = {
+    ...session,
+    currentIndex: session.currentIndex + 1,
+    returnUrl: window.location.href
+  };
+  chrome.storage.local.set({ [STORAGE_KEY]: updatedSession });
+
+  btn.click();
+
+  // Wait to see if a popup appears on THIS page (some profiles show a modal)
+  const sendBtn = await waitForSendButton(5000);
+  if (sendBtn) {
+    sendBtn.click();
+    const newSession = { ...updatedSession, sent: updatedSession.sent + 1 };
+    chrome.storage.local.set({ [STORAGE_KEY]: newSession });
+    updateStatus(`✅ Sent! (${newSession.sent}/${newSession.limit}). Waiting...`);
+    const delay = randomDelay(newSession.delayMin, newSession.delayMax);
+    await sleep(delay);
+    runSearchPageFlow(newSession);
+  }
+  // else: page navigated away, handleInvitePage will take over
+}
+
+// ─────────────────────────────────────────────────────────
+// INVITE PAGE: Click Send and go back
+// ─────────────────────────────────────────────────────────
+async function handleInvitePage(session) {
+  updateStatus('📨 On invite page — sending...');
+  
+  const sendBtn = await waitForSendButton(10000);
+  if (sendBtn) {
+    sendBtn.click();
+    const updatedSession = { ...session, sent: session.sent + 1 };
+    chrome.storage.local.set({ [STORAGE_KEY]: updatedSession });
+    updateStatus(`✅ Sent! (${updatedSession.sent}/${updatedSession.limit}). Going back...`);
+    
+    // Wait the human-like delay THEN go back to search results
+    const delay = randomDelay(session.delayMin, session.delayMax);
+    await sleep(delay);
+    window.history.back();
+  } else {
+    updateStatus('⚠️ Could not find Send button on invite page.', 'error');
+    // Still go back to continue with next lead
+    await sleep(3000);
+    window.history.back();
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────
+function getConnectButtons() {
+  return Array.from(document.querySelectorAll('button, a'))
+    .filter(b => {
+      const label = (b.getAttribute('aria-label') || '').toLowerCase();
+      const text = (b.innerText || '').toLowerCase().trim();
+      if (['pending', 'message', 'following', 'withdraw'].some(w => text.includes(w))) return false;
+      return label.startsWith('invite') && label.endsWith('to connect');
+    });
+}
+
+async function waitForSendButton(timeout = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const allBtns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+    const found = allBtns.find(b => {
+      const t = (b.innerText || '').toLowerCase();
+      const l = (b.getAttribute('aria-label') || '').toLowerCase();
+      return (t.includes('send without a note') || 
+              (t.includes('send') && !t.includes('feedback') && !t.includes('message') && !t.includes('report'))) &&
+             b.offsetParent !== null;
+    });
+    if (found) return found;
+    await sleep(400);
   }
   return null;
 }
 
-function findInDocument(doc, textMatch) {
-  const query = 'button, a, [role="button"], span, div';
-  const elements = Array.from(doc.querySelectorAll(query));
-  return elements.find(el => {
-    const t = (el.innerText || '').toLowerCase();
-    const l = (el.getAttribute('aria-label') || '').toLowerCase();
-    const c = (el.className || '').toLowerCase();
-    
-    // Exact or partial match for the text
-    const hasText = t.includes(textMatch.toLowerCase()) || l.includes(textMatch.toLowerCase());
-    
-    // Additional heuristics for the blue "Send" button
-    const isBlueSend = textMatch.toLowerCase() === 'send' && 
-                       (c.includes('primary') || t.includes('note'));
-    
-    return (hasText || isBlueSend) && el.offsetParent !== null; 
-  });
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-async function autoConnect(options) {
-  stopConnection = false;
-  const { delayMin = 5000, delayMax = 15000, limit = 10 } = options;
-  
-  updateStatus(`Scanning for buttons...`);
-  
-  let count = 0;
-  
-  const findConnectButtons = () => {
-    return Array.from(document.querySelectorAll('button, a'))
-      .filter(b => {
-        const label = (b.getAttribute('aria-label') || '').toLowerCase();
-        const text = (b.innerText || '').toLowerCase();
-        if (text.includes("pending") || text.includes("message") || text.includes("following") || text.includes("withdraw")) return false;
-        
-        return (label.includes('connect') && !label.includes('message')) || 
-               (text.trim() === 'connect') || (text.trim() === '+ connect') ||
-               (label.startsWith('invite') && label.endsWith('to connect'));
-      });
-  };
-
-  let connectButtons = findConnectButtons();
-  updateStatus(`Found ${connectButtons.length} potential leads.`);
-  await new Promise(r => setTimeout(r, 2000));
-
-  for (let btn of connectButtons) {
-    if (stopConnection) break;
-    if (count >= limit) break;
-
-    try {
-      const name = btn.getAttribute('aria-label')?.split('Invite ')[1]?.split(' to connect')[0] || "someone";
-      updateStatus(`Connecting with ${name}...`);
-      
-      btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      await new Promise(r => setTimeout(r, 1500));
-
-      btn.click();
-      
-      // Wait for the Send button to appear in the popup
-      const sendBtn = await waitForElement('send');
-      
-      if (sendBtn) {
-        updateStatus(`Finalizing request to ${name}...`);
-        sendBtn.click();
-        count++;
-        await new Promise(r => setTimeout(r, 2000));
-      } else {
-          // Check if maybe it was sent automatically (button text changed to Pending)
-          await new Promise(r => setTimeout(r, 2000));
-          const textAfter = (btn.innerText || '').toLowerCase();
-          if (textAfter.includes('pending') || textAfter.includes('withdraw')) {
-              count++;
-              updateStatus(`Success (Auto-sent)!`);
-          } else {
-              updateStatus(`Could not find Send button.`, 'error');
-          }
-      }
-
-      // Check for success/dismissal popups like "Got it"
-      const doneBtn = await waitForElement('done', 2000);
-      if (doneBtn) doneBtn.click();
-
-      const nextDelay = Math.floor(Math.random() * (delayMax - delayMin)) + delayMin;
-      updateStatus(`Success! Waiting ${Math.round(nextDelay/1000)}s...`);
-      await new Promise(r => setTimeout(r, nextDelay));
-
-    } catch (err) {
-      console.error("Error:", err);
-      updateStatus("Error clicking button.", "error");
-    }
-  }
-
-  updateStatus(`Sent ${count} requests! Done.`);
+function randomDelay(min, max) {
+  return Math.floor(Math.random() * (max - min)) + min;
 }
