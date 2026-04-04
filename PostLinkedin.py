@@ -47,8 +47,8 @@ async def ensure_linkedin_login(page, linkedin_username, linkedin_password):
     await page.click("button[type='submit']")
     
     try:
-        # Wait for successful login (search bar appears)
-        await page.wait_for_selector("input[aria-label='Search']", timeout=60000)
+        # Wait for successful login (redirect to feed)
+        await page.wait_for_url("**/feed/**", timeout=60000)
         logger.info("Login successful!")
         
         # Save session state
@@ -56,7 +56,8 @@ async def ensure_linkedin_login(page, linkedin_username, linkedin_password):
         await context.storage_state(path=STORAGE_STATE_PATH)
         return True
     except Exception as e:
-        logger.error(f"Login failed: {str(e)}")
+        await page.screenshot(path="login_failure.png")
+        logger.error(f"Login failed, screenshot saved to login_failure.png: {str(e)}")
         return False
 
 async def post_to_linkedin(content: str, username: str = None, password: str = None, add_hashtags: bool = True) -> str:
@@ -97,7 +98,7 @@ async def post_to_linkedin(content: str, username: str = None, password: str = N
             if os.path.exists(STORAGE_STATE_PATH):
                 context_args['storage_state'] = STORAGE_STATE_PATH
             
-            browser = await p.chromium.launch(headless=False)  # Set to True for headless mode
+            browser = await p.chromium.launch(headless=True)  # Set to True for headless mode
             context = await browser.new_context(**context_args)
             page = await context.new_page()
             
