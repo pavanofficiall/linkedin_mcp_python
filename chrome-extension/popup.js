@@ -13,16 +13,26 @@ document.getElementById('startBtn').addEventListener('click', () => {
     statusText.style.color = "#FFD700";
     
     chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-      if (tabs[0]) {
-        chrome.tabs.sendMessage(tabs[0].id, {
-          action: "START_CONNECT",
-          options: {
-            limit: limit,
-            delayMin: Math.max(2000, delay - 3000),
-            delayMax: delay + 3000
-          }
-        });
+      if (tabs.length === 0 || !tabs[0].url.includes('linkedin.com')) {
+        statusText.innerText = "Error: Not on LinkedIn!";
+        statusText.style.color = "red";
+        return;
       }
+      
+      chrome.tabs.sendMessage(tabs[0].id, {
+        action: "START_CONNECT",
+        options: {
+          limit: limit,
+          delayMin: Math.max(2000, delay - 3000),
+          delayMax: delay + 3000
+        }
+      }, function(response) {
+        if (chrome.runtime.lastError) {
+          statusText.innerText = "Error: Refresh the page!";
+          statusText.style.color = "red";
+          console.error(chrome.runtime.lastError);
+        }
+      });
     });
 });
 
