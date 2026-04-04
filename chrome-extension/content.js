@@ -148,3 +148,25 @@ async function autoConnect(options) {
 
   updateStatus(`Sent ${count} requests! Done.`);
 }
+
+// AUTO-RUN ON CUSTOM INVITE PAGES
+(async function init() {
+    console.log("Checking for custom invite page...");
+    if (window.location.href.includes('/preload/custom-invite/')) {
+        console.log("Custom invite page detected. Auto-sending...");
+        const sendBtn = await waitForElement('send', 15000); // 15s timeout
+        if (sendBtn) {
+            console.log("Send button found! Clicking in 1 second...");
+            await new Promise(r => setTimeout(r, 1000));
+            sendBtn.click();
+            console.log("Sent!");
+            
+            // Optional: Close tab or go back after success
+            await new Promise(r => setTimeout(r, 2000));
+            const doneBtn = await waitForElement('done', 5000);
+            if (doneBtn) doneBtn.click();
+        } else {
+            console.warn("Could not find send button on this page.");
+        }
+    }
+})();
