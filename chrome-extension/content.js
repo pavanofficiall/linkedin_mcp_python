@@ -24,7 +24,24 @@ function sleep(ms) {
 }
 
 function updateStatus(text, type = 'info') {
-  chrome.runtime.sendMessage({ action: "UPDATE_STATUS", text, type });
+  if (chrome.runtime && chrome.runtime.sendMessage) {
+    chrome.runtime.sendMessage({ action: "UPDATE_STATUS", text, type }).catch(() => {});
+  }
+}
+
+async function waitForElement(selector, textMatch, timeout = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const elements = Array.from(document.querySelectorAll(selector));
+    const found = elements.find(el => {
+      const t = (el.innerText || '').toLowerCase();
+      const l = (el.getAttribute('aria-label') || '').toLowerCase();
+      return t.includes(textMatch.toLowerCase()) || l.includes(textMatch.toLowerCase());
+    });
+    if (found) return found;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return null;
 }
 
 async function autoConnect(options) {
@@ -40,15 +57,16 @@ async function autoConnect(options) {
       .filter(b => {
         const label = (b.getAttribute('aria-label') || '').toLowerCase();
         const text = (b.innerText || '').toLowerCase();
-        if (text.includes("pending") || text.includes("message") || text.includes("following")) return false;
+        if (text.includes("pending") || text.includes("message") || text.includes("following") || text.includes("withdraw")) return false;
         
         return (label.includes('connect') && !label.includes('message')) || 
-               (text.trim() === 'connect') || (text.trim() === '+ connect');
+               (text.trim() === 'connect') || (text.trim() === '+ connect') ||
+               (label.startsWith('invite') && label.endsWith('to connect'));
       });
   };
 
   let connectButtons = findConnectButtons();
-  updateStatus(`Found ${connectButtons.length} buttons.`);
+  updateStatus(`Found ${connectButtons.length} potential leads.`);
   await new Promise(r => setTimeout(r, 2000));
 
   for (let btn of connectButtons) {
@@ -57,34 +75,44 @@ async function autoConnect(options) {
 
     try {
       const name = btn.getAttribute('aria-label')?.split('Invite ')[1]?.split(' to connect')[0] || "someone";
-      updateStatus(`Inviting ${name}... (${count + 1}/${limit})`);
+      updateStatus(`Connecting with ${name}...`);
       
       btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1500));
 
       btn.click();
-      count++;
-
-      await new Promise(r => setTimeout(r, 2500));
-
-      const dialogButtons = Array.from(document.querySelectorAll('button'));
-      const sendBtn = dialogButtons.find(b => {
-        const t = (b.innerText || '').toLowerCase();
-        const l = (b.getAttribute('aria-label') || '').toLowerCase();
-        return t.includes("send without a note") || t.trim() === "send" || l.includes("send invitation");
-      });
-
+      
+      // Wait for the Send button to appear in the popup
+      const sendBtn = await waitForElement('button', 'send');
+      
       if (sendBtn) {
+        updateStatus(`Finalizing request to ${name}...`);
         sendBtn.click();
+        count++;
         await new Promise(r => setTimeout(r, 2000));
+      } else {
+          // Check if maybe it was sent automatically (button text changed to Pending)
+          await new Promise(r => setTimeout(r, 2000));
+          const textAfter = (btn.innerText || '').toLowerCase();
+          if (textAfter.includes('pending') || textAfter.includes('withdraw')) {
+              count++;
+              updateStatus(`Success (Auto-sent)!`);
+          } else {
+              updateStatus(`Could not find Send button.`, 'error');
+          }
       }
 
+      // Check for success/dismissal popups like "Got it"
+      const doneBtn = await waitForElement('button', 'done', 2000);
+      if (doneBtn) doneBtn.click();
+
       const nextDelay = Math.floor(Math.random() * (delayMax - delayMin)) + delayMin;
-      updateStatus(`Waiting ${Math.round(nextDelay/1000)}s...`);
+      updateStatus(`Success! Waiting ${Math.round(nextDelay/1000)}s...`);
       await new Promise(r => setTimeout(r, nextDelay));
 
     } catch (err) {
-      console.error("Error clicking button:", err);
+      console.error("Error:", err);
+      updateStatus("Error clicking button.", "error");
     }
   }
 
