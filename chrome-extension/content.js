@@ -5,7 +5,44 @@
  * human-like clicks.
  */
 
-console.log("LinkedIn Auto-Connect Extension loaded!");
+console.log("LinkedIn Auto-Connect Extension loaded on:", window.location.href);
+
+// -------------------------------------------------------
+// AUTO-SEND on /preload/custom-invite/ page
+// LinkedIn sometimes redirects here instead of showing a popup.
+// We detect this page and click "Send without a note" automatically.
+// -------------------------------------------------------
+if (window.location.href.includes('/preload/custom-invite/') || 
+    window.location.href.includes('/checkpoint/') ||
+    document.title.toLowerCase().includes('invite')) {
+  console.log("On invite page! Auto-clicking Send without a note...");
+  autoClickSendOnInvitePage();
+}
+
+async function autoClickSendOnInvitePage() {
+  // Wait up to 10 seconds for the page to load the button
+  const start = Date.now();
+  while (Date.now() - start < 10000) {
+    const allBtns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+    const sendBtn = allBtns.find(b => {
+      const t = (b.innerText || '').toLowerCase();
+      const l = (b.getAttribute('aria-label') || '').toLowerCase();
+      return t.includes('send without a note') || 
+             (t.includes('send') && !t.includes('feedback') && !t.includes('message')) ||
+             l.includes('send without a note');
+    });
+    
+    if (sendBtn && sendBtn.offsetParent !== null) {
+      console.log("Found Send button:", sendBtn.innerText);
+      sendBtn.click();
+      console.log("Clicked! Request sent.");
+      return;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  console.log("Could not find Send button on invite page.");
+}
+
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "START_CONNECT") {
@@ -148,25 +185,3 @@ async function autoConnect(options) {
 
   updateStatus(`Sent ${count} requests! Done.`);
 }
-
-// AUTO-RUN ON CUSTOM INVITE PAGES
-(async function init() {
-    console.log("Checking for custom invite page...");
-    if (window.location.href.includes('/preload/custom-invite/')) {
-        console.log("Custom invite page detected. Auto-sending...");
-        const sendBtn = await waitForElement('send', 15000); // 15s timeout
-        if (sendBtn) {
-            console.log("Send button found! Clicking in 1 second...");
-            await new Promise(r => setTimeout(r, 1000));
-            sendBtn.click();
-            console.log("Sent!");
-            
-            // Optional: Close tab or go back after success
-            await new Promise(r => setTimeout(r, 2000));
-            const doneBtn = await waitForElement('done', 5000);
-            if (doneBtn) doneBtn.click();
-        } else {
-            console.warn("Could not find send button on this page.");
-        }
-    }
-})();
