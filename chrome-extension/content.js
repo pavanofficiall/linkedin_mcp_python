@@ -31,14 +31,25 @@ function updateStatus(text, type = 'info') {
 
 async function waitForElement(selector, textMatch, timeout = 10000) {
   const start = Date.now();
+  console.log(`Starting wait for: ${textMatch}`);
   while (Date.now() - start < timeout) {
-    const elements = Array.from(document.querySelectorAll(selector));
-    const found = elements.find(el => {
+    // Search in ALL elements first, then narrow down if needed
+    const allElements = Array.from(document.querySelectorAll(selector + ', .artdeco-button--primary, .artdeco-button--solid'));
+    const found = allElements.find(el => {
       const t = (el.innerText || '').toLowerCase();
       const l = (el.getAttribute('aria-label') || '').toLowerCase();
-      return t.includes(textMatch.toLowerCase()) || l.includes(textMatch.toLowerCase());
+      const c = (el.className || '').toLowerCase();
+      
+      const match = t.includes(textMatch.toLowerCase()) || 
+                    l.includes(textMatch.toLowerCase()) ||
+                    (textMatch === 'send' && (c.includes('send') || t.includes('without a note')));
+      
+      return match && el.offsetParent !== null; // Must be visible
     });
-    if (found) return found;
+    if (found) {
+        console.log(`Found element: ${found.innerText}`);
+        return found;
+    }
     await new Promise(r => setTimeout(r, 500));
   }
   return null;
