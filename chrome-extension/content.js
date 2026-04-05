@@ -1,22 +1,30 @@
 /* 
- * LinkedIn Auto-Connect Content Script
- * State-based approach using chrome.storage to survive page navigations.
+ * LinkedIn Auto-Connect Content Script v3
+ * State-machine using chrome.storage to survive page navigations.
+ * Checks state IMMEDIATELY on load (no window.load event dependency).
  */
 
 const STORAGE_KEY = 'li_autoconnect_session';
 
 function updateStatus(text, type = 'info') {
-  if (chrome.runtime && chrome.runtime.sendMessage) {
-    chrome.runtime.sendMessage({ action: "UPDATE_STATUS", text, type }).catch(() => {});
-  }
+  try {
+    chrome.runtime.sendMessage({ action: "UPDATE_STATUS", text, type });
+  } catch(e) {}
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function randomDelay(min, max) {
+  return Math.floor(Math.random() * (max - min)) + min;
 }
 
 // ─────────────────────────────────────────────────────────
-// MESSAGE LISTENER — START / STOP from popup
+// LISTEN for START / STOP from popup
 // ─────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "START_CONNECT") {
-    // Save session to storage and begin
     const session = {
       active: true,
       currentIndex: 0,
@@ -28,9 +36,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     };
     chrome.storage.local.set({ [STORAGE_KEY]: session }, () => {
       sendResponse({ status: "STARTED" });
-      runSearchPageFlow(session);
+      setTimeout(() => runSearchPageFlow(session), 2000);
     });
-    return true; // Keep channel open for async sendResponse
+    return true;
   }
 
   if (request.action === "STOP_CONNECT") {
@@ -41,29 +49,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 // ─────────────────────────────────────────────────────────
-// ON PAGE LOAD — decide what to do based on current URL
+// IMMEDIATELY on script load — check state and act
 // ─────────────────────────────────────────────────────────
-window.addEventListener('load', () => {
+(function init() {
+  const url = window.location.href;
+  console.log('[AutoConnect] Content script loaded on:', url);
+
   chrome.storage.local.get(STORAGE_KEY, (data) => {
     const session = data[STORAGE_KEY];
-    if (!session || !session.active) return;
+    if (!session || !session.active) {
+      console.log('[AutoConnect] No active session.');
+      return;
+    }
 
-    const url = window.location.href;
+    console.log('[AutoConnect] Active session found:', session);
 
-    // Case 1: We're on the custom-invite redirect page → click Send
-    if (url.includes('/preload/custom-invite/') || url.includes('/in/') && url.includes('invite')) {
+    // Case 1: Custom invite redirect page — click Send
+    if (url.includes('/preload/custom-invite/')) {
+      console.log('[AutoConnect] On invite page. Clicking Send...');
       handleInvitePage(session);
     }
-    // Case 2: We're back on the search results page → continue loop
+    // Case 2: Back on search results — continue
     else if (url.includes('/search/results/people/')) {
-      // Small delay to let the page render fully
+      console.log('[AutoConnect] Back on search page. Continuing...');
       setTimeout(() => runSearchPageFlow(session), 3000);
     }
   });
-});
+})();
 
 // ─────────────────────────────────────────────────────────
-// SEARCH PAGE: Find connect buttons and click the right one
+// SEARCH PAGE: Click connect on the next lead
 // ─────────────────────────────────────────────────────────
 async function runSearchPageFlow(session) {
   if (!session.active) return;
@@ -74,16 +89,14 @@ async function runSearchPageFlow(session) {
     return;
   }
 
-  updateStatus(`🔍 Finding leads... (${session.sent}/${session.limit} sent)`);
-
-  // Wait for results to load
+  updateStatus(`🔍 Scanning leads... (${session.sent}/${session.limit} sent)`);
   await sleep(2000);
 
   const connectButtons = getConnectButtons();
-  console.log(`Found ${connectButtons.length} connect buttons, targeting index ${session.currentIndex}`);
+  console.log(`[AutoConnect] Found ${connectButtons.length} connect buttons, index: ${session.currentIndex}`);
 
   if (connectButtons.length === 0) {
-    updateStatus('⚠️ No connect buttons found. Scroll down?', 'error');
+    updateStatus('⚠️ No connect buttons found on this page.', 'error');
     return;
   }
 
@@ -94,58 +107,66 @@ async function runSearchPageFlow(session) {
     return;
   }
 
-  const name = btn.getAttribute('aria-label')?.replace('Invite ', '').replace(' to connect', '') || 'someone';
+  const name = btn.getAttribute('aria-label')
+    ?.replace('Invite ', '').replace(' to connect', '') || 'someone';
+
   updateStatus(`🤝 Connecting with ${name}...`);
+  console.log(`[AutoConnect] Clicking connect for: ${name}`);
 
-  btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  await sleep(1500);
-
-  // Save incremented index BEFORE clicking (in case of navigation)
+  // Save state BEFORE clicking (page may navigate away)
   const updatedSession = {
     ...session,
     currentIndex: session.currentIndex + 1,
     returnUrl: window.location.href
   };
-  chrome.storage.local.set({ [STORAGE_KEY]: updatedSession });
+  await new Promise(resolve => {
+    chrome.storage.local.set({ [STORAGE_KEY]: updatedSession }, resolve);
+  });
 
+  btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  await sleep(1000);
   btn.click();
 
-  // Wait to see if a popup appears on THIS page (some profiles show a modal)
-  const sendBtn = await waitForSendButton(5000);
+  // Check if a modal appeared on THIS page (some profiles use a popup)
+  const sendBtn = await waitForSendButton(4000);
   if (sendBtn) {
+    console.log('[AutoConnect] Modal found on same page! Clicking Send...');
     sendBtn.click();
     const newSession = { ...updatedSession, sent: updatedSession.sent + 1 };
     chrome.storage.local.set({ [STORAGE_KEY]: newSession });
     updateStatus(`✅ Sent! (${newSession.sent}/${newSession.limit}). Waiting...`);
-    const delay = randomDelay(newSession.delayMin, newSession.delayMax);
-    await sleep(delay);
+    await sleep(randomDelay(newSession.delayMin, newSession.delayMax));
     runSearchPageFlow(newSession);
   }
-  // else: page navigated away, handleInvitePage will take over
+  // else: navigated away → handleInvitePage() will pick up on next page load
 }
 
 // ─────────────────────────────────────────────────────────
-// INVITE PAGE: Click Send and go back
+// INVITE PAGE: Click Send, then navigate back to search
 // ─────────────────────────────────────────────────────────
 async function handleInvitePage(session) {
-  updateStatus('📨 On invite page — sending...');
+  updateStatus('📨 On invite page — clicking Send...');
   
   const sendBtn = await waitForSendButton(10000);
+  
   if (sendBtn) {
+    console.log('[AutoConnect] Found Send button:', sendBtn.innerText);
     sendBtn.click();
     const updatedSession = { ...session, sent: session.sent + 1 };
     chrome.storage.local.set({ [STORAGE_KEY]: updatedSession });
-    updateStatus(`✅ Sent! (${updatedSession.sent}/${updatedSession.limit}). Going back...`);
+    updateStatus(`✅ Request sent! (${updatedSession.sent}/${updatedSession.limit}) Going back...`);
     
-    // Wait the human-like delay THEN go back to search results
     const delay = randomDelay(session.delayMin, session.delayMax);
+    console.log(`[AutoConnect] Waiting ${delay}ms then navigating back to: ${session.returnUrl}`);
     await sleep(delay);
-    window.history.back();
+    
+    // Navigate directly back to the search results (more reliable than history.back)
+    window.location.href = session.returnUrl;
   } else {
-    updateStatus('⚠️ Could not find Send button on invite page.', 'error');
-    // Still go back to continue with next lead
-    await sleep(3000);
-    window.history.back();
+    console.log('[AutoConnect] Could NOT find Send button. Going back anyway.');
+    updateStatus('⚠️ Could not find Send button.', 'error');
+    await sleep(2000);
+    window.location.href = session.returnUrl;
   }
 }
 
@@ -169,20 +190,16 @@ async function waitForSendButton(timeout = 8000) {
     const found = allBtns.find(b => {
       const t = (b.innerText || '').toLowerCase();
       const l = (b.getAttribute('aria-label') || '').toLowerCase();
-      return (t.includes('send without a note') || 
-              (t.includes('send') && !t.includes('feedback') && !t.includes('message') && !t.includes('report'))) &&
-             b.offsetParent !== null;
+      const isSend = t.includes('send without a note') || l.includes('send without a note') ||
+                     (t.trim() === 'send' && !t.includes('feedback') && !t.includes('message'));
+      return isSend && b.offsetParent !== null;
     });
-    if (found) return found;
+    if (found) {
+      console.log('[AutoConnect] Send button found:', found.innerText);
+      return found;
+    }
     await sleep(400);
   }
+  console.log('[AutoConnect] Send button NOT found after timeout.');
   return null;
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-function randomDelay(min, max) {
-  return Math.floor(Math.random() * (max - min)) + min;
 }
