@@ -21,26 +21,9 @@ function randomDelay(min, max) {
 }
 
 // ─────────────────────────────────────────────────────────
-// LISTEN for START / STOP from popup
+// LISTEN for STOP from popup only
 // ─────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "START_CONNECT") {
-    const session = {
-      active: true,
-      currentIndex: 0,
-      limit: request.options.limit || 10,
-      delayMin: request.options.delayMin || 5000,
-      delayMax: request.options.delayMax || 12000,
-      sent: 0,
-      returnUrl: window.location.href
-    };
-    chrome.storage.local.set({ [STORAGE_KEY]: session }, () => {
-      sendResponse({ status: "STARTED" });
-      setTimeout(() => runSearchPageFlow(session), 2000);
-    });
-    return true;
-  }
-
   if (request.action === "STOP_CONNECT") {
     chrome.storage.local.remove(STORAGE_KEY);
     updateStatus('⏹ Stopped.');
@@ -178,8 +161,12 @@ function getConnectButtons() {
     .filter(b => {
       const label = (b.getAttribute('aria-label') || '').toLowerCase();
       const text = (b.innerText || '').toLowerCase().trim();
-      if (['pending', 'message', 'following', 'withdraw'].some(w => text.includes(w))) return false;
-      return label.startsWith('invite') && label.endsWith('to connect');
+      // Skip already-connected or non-connect buttons
+      if (['pending', 'message', 'following', 'withdraw'].some(w => text.includes(w) || label.includes(w))) return false;
+      // Match by aria-label (profile pages) OR by visible text (search results)
+      return (label.includes('invite') && label.includes('to connect')) ||
+             (text === 'connect') ||
+             (label === 'connect');
     });
 }
 

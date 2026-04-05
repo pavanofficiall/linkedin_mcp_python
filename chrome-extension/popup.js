@@ -1,7 +1,10 @@
 /* 
- * LinkedIn Auto-Connect Popup Script
+ * LinkedIn Auto-Connect Popup Script v4
+ * Save session to storage FIRST, then navigate.
+ * No message sending needed - content script reads storage on load.
  */
 
+const STORAGE_KEY = 'li_autoconnect_session';
 const statusText = document.getElementById('statusText');
 
 function setStatus(text, color = 'white') {
@@ -16,60 +19,42 @@ chrome.runtime.onMessage.addListener((request) => {
   }
 });
 
-document.getElementById('startBtn').addEventListener('click', async () => {
+document.getElementById('startBtn').addEventListener('click', () => {
   const query = document.getElementById('searchQuery').value.trim();
   const limit = parseInt(document.getElementById('limit').value) || 10;
   const delay = parseInt(document.getElementById('delay').value) || 8000;
 
   if (!query) {
-    setStatus('⚠️ Please enter a search query!', '#FFD700');
+    setStatus('⚠️ Enter a search query first!', '#FFD700');
     return;
   }
 
-  setStatus('🔍 Searching LinkedIn...', '#FFD700');
-
-  // Build the LinkedIn People search URL
   const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(query)}`;
 
-  // Get the current active tab
-  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-    const tabId = tabs[0].id;
+  // 1. Save session to storage FIRST
+  const session = {
+    active: true,
+    currentIndex: 0,
+    limit: limit,
+    delayMin: Math.max(3000, delay - 3000),
+    delayMax: delay + 3000,
+    sent: 0,
+    returnUrl: searchUrl
+  };
 
-    // Navigate current tab to the search results page
-    chrome.tabs.update(tabId, { url: searchUrl }, function () {
-      // Wait for the page to load, then start auto-connecting
-      chrome.tabs.onUpdated.addListener(function listener(updatedTabId, changeInfo) {
-        if (updatedTabId === tabId && changeInfo.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          
-          setStatus('🤖 Starting auto-connect...', '#FFD700');
-
-          // Small delay to let LinkedIn fully render
-          setTimeout(() => {
-            chrome.tabs.sendMessage(tabId, {
-              action: "START_CONNECT",
-              options: {
-                limit: limit,
-                delayMin: Math.max(3000, delay - 3000),
-                delayMax: delay + 3000
-              }
-            }, function (response) {
-              if (chrome.runtime.lastError) {
-                setStatus('⚠️ Error: Refresh and try again!', '#ff8a80');
-              }
-            });
-          }, 3000);
-        }
-      });
+  chrome.storage.local.set({ [STORAGE_KEY]: session }, () => {
+    setStatus('🔍 Navigating to search...', '#FFD700');
+    // 2. Then navigate — content script will pick up the session automatically
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      chrome.tabs.update(tabs[0].id, { url: searchUrl });
     });
   });
 });
 
 document.getElementById('stopBtn').addEventListener('click', () => {
-  setStatus('⏹ Stopped.', 'lightgrey');
-  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-    if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, { action: "STOP_CONNECT" });
-    }
+  chrome.storage.local.remove(STORAGE_KEY);
+  setStatus('⏹ Stopped.');
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, { action: "STOP_CONNECT" });
   });
 });
